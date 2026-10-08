@@ -4,11 +4,13 @@ from datetime import datetime
 import json
 
 # MongoDB
-client = pymongo.MongoClient("mongodb://vibeossupport_db_user:T5MgK81nVoZk50bc@ac-kryc93r-shard-00-00.ibuc0rv.mongodb.net:27017,ac-kryc93r-shard-00-01.ibuc0rv.mongodb.net:27017,ac-kryc93r-shard-00-02.ibuc0rv.mongodb.net:27017/?ssl=true&replicaSet=atlas-fmry30-shard-0&authSource=admin&appName=Cluster0")
+client = pymongo.MongoClient(os.environ["MONGODB_URI"])
 db = client["vibeOS"]
 
-# Groq
-groq_client = Groq(api_key="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")
+#groq
+groq_client = Groq(
+    api_key=os.environ["GROQ_API_KEY"]
+)
 
 prompt = """
 Generate content for Instagram trends in India.
