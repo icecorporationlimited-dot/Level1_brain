@@ -1,3 +1,4 @@
 pymongo
 groq
-tzdata
+requests
+dnspython
