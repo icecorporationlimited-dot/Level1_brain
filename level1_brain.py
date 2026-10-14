@@ -1,125 +1,52 @@
-import os
-import json
+"""level1_brain.py — daily Trend Brain job (GitHub Actions).
+
+1. AI ideas   -> trend_items (source_type="ai_generated")   [needs GROQ_API_KEY]
+2. YouTube    -> trend_items (source_type="sourced")        [needs YOUTUBE_API_KEY, optional]
+3. Legacy doc -> `trends` collection, so the old bot code keeps working during rollout.
+"""
 import logging
+import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pymongo
 from groq import Groq
 
+from trends import store
+from trends.sources import ai_ideas, youtube
+
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
-# Environment variables
-MONGODB_URI = os.environ["MONGODB_URI"]
-GROQ_API_KEY = os.environ["GROQ_API_KEY"]
-
+logger = logging.getLogger("level1_brain")
 IST = ZoneInfo("Asia/Kolkata")
-MODEL = "openai/gpt-oss-120b"
-MAX_RETRIES = 3
-
-client = pymongo.MongoClient(MONGODB_URI, serverSelectionTimeoutMS=15000)
-db = client["vibeOS"]
-trends_collection = db["trends"]
-
-groq_client = Groq(api_key=GROQ_API_KEY)
-
-PROMPT = """
-Generate Instagram content ideas for a Gen-Z audience in India.
-
-Return exactly valid JSON with these keys:
-{
-  "audios": [
-    {
-      "name": "audio name or search phrase",
-      "vibe": "baddie, soft, funny, or cinematic",
-      "use_case": "short suggested use-case"
-    }
-  ],
-  "captions": [
-    "short Instagram caption"
-  ]
-}
-
-Requirements:
-- Exactly 5 audio suggestions.
-- Exactly 5 captions.
-- Male and female aesthetic styles.
-- Confident, stylish, Gen-Z-friendly ideas.
-- Keep audio names or search phrases concise.
-- Do not invent popularity statistics or claim an audio is verified
-  as trending without evidence.
-- These are suggestions, not verified live Instagram trends.
-- Return JSON only.
-"""
-
-
-def generate_trends():
-    """Call Groq and return validated (audios, captions). Retries on bad output."""
-    last_error = None
-
-    for attempt in range(1, MAX_RETRIES + 1):
-        try:
-            response = groq_client.chat.completions.create(
-                model=MODEL,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "Return only valid JSON. Do not use Markdown.",
-                    },
-                    {"role": "user", "content": PROMPT},
-                ],
-                temperature=0.7,
-                response_format={"type": "json_object"},
-            )
-
-            raw = response.choices[0].message.content
-            if not raw:
-                raise ValueError("Groq returned an empty response")
-
-            result = json.loads(raw)
-            audios = result.get("audios")
-            captions = result.get("captions")
-
-            if not isinstance(audios, list) or len(audios) != 5:
-                raise ValueError("Expected exactly 5 audio suggestions")
-            if not isinstance(captions, list) or len(captions) != 5:
-                raise ValueError("Expected exactly 5 captions")
-
-            return audios, captions
-
-        except Exception as exc:
-            last_error = exc
-            logger.warning("Attempt %s/%s failed: %s", attempt, MAX_RETRIES, exc)
-
-    raise RuntimeError(f"Trend generation failed after retries: {last_error}")
 
 
 def main():
-    # Fail early if MongoDB credentials or network access are wrong.
-    client.admin.command("ping")
-    logger.info("MongoDB connected")
+    client = pymongo.MongoClient(os.environ["MONGODB_URI"], serverSelectionTimeoutMS=15000)
+    try:
+        client.admin.command("ping")
+        db = client["vibeOS"]
+        store.ensure_indexes(db)
 
-    audios, captions = generate_trends()
+        audios, captions = ai_ideas.generate(Groq(api_key=os.environ["GROQ_API_KEY"]))
+        n_ai = store.upsert_items(db, ai_ideas.to_items(audios, captions))
 
-    today = datetime.now(IST).strftime("%Y-%m-%d")
+        n_src = 0
+        yt_key = os.environ.get("YOUTUBE_API_KEY")
+        if yt_key:
+            n_src = store.upsert_items(db, youtube.fetch(yt_key))
+        else:
+            logger.warning("YOUTUBE_API_KEY not set — skipping sourced trends")
 
-    document = {
-        "date": today,
-        "data": {"audios": audios, "captions": captions},
-        "created_at": datetime.now(IST),
-    }
-
-    # One document per India-local calendar date.
-    trends_collection.update_one({"date": today}, {"$set": document}, upsert=True)
-
-    logger.info("Level 1 Brain saved trends for %s", today)
-    logger.info("Audio suggestions: %s", len(audios))
-    logger.info("Caption suggestions: %s", len(captions))
+        today = datetime.now(IST).strftime("%Y-%m-%d")
+        db["trends"].update_one(
+            {"date": today},
+            {"$set": {"date": today, "data": {"audios": audios, "captions": captions},
+                      "created_at": datetime.now(IST)}},
+            upsert=True)
+        logger.info("Saved %s AI ideas, %s sourced trends for %s", n_ai, n_src, today)
+    finally:
+        client.close()
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    finally:
-        client.close()
+    main()
